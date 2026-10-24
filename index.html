@@ -124,7 +124,8 @@ details > summary span { font-size: 13px; color: var(--muted); }
 .dcol[data-s="good"] .c-val, .dcol[data-s="bad"] .c-val, .dcol[data-s="good"] .c-unit, .dcol[data-s="bad"] .c-unit { color: var(--on-status); }
 .dcol[data-s="good"] .c-status { color: var(--good); }
 .dcol[data-s="bad"] .c-status { color: var(--bad); }
-.train-tools { display: flex; justify-content: center; }
+.train-tools { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+#btn-voice[aria-pressed="true"], #btn-metro.on { border-color: var(--accent); color: var(--accent); }
 .sim-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
 .sim-head strong { font: 700 1.05rem var(--f-display); letter-spacing: .03em; }
 .sim-head span { font-size: 13px; color: var(--muted); }
@@ -299,7 +300,7 @@ footer { font-size: 12px; color: var(--muted); max-width: 80ch; }
         <div class="card dial-card"><div class="lbl">Rate <span>· per minute</span></div><div class="dial" id="dial-rate" data-s="idle"></div></div>
         <div class="card dial-card"><div class="lbl">Depth <span id="depth-unit-note">· top and bottom</span></div><div class="dcol" id="depth-col" data-s="idle"></div></div>
       </div>
-      <div class="train-tools"><button id="btn-metro" class="ghost"><span class="beat" id="beat"></span>Metronome off</button></div>
+      <div class="train-tools"><button id="btn-metro" class="ghost"><span class="beat" id="beat"></span>Metronome off</button><button id="btn-voice" class="ghost" aria-pressed="false">Voice coach off</button></div>
 
       <details class="card more" id="more">
         <summary><strong>Session details</strong><span id="more-sum">0 compressions</span></summary>
@@ -625,7 +626,7 @@ if (typeof module !== 'undefined') module.exports = RF;
     live.comps.push(c); if (live.comps.length > 200) live.comps.shift();
     if (mode === 'train') session.push(c);
     if (test && test.phase === 'run' && c.t >= test.start && c.t <= test.end) test.comps.push(c);
-    if (mode === 'train') updateCompUI();
+    if (mode === 'train') { updateCompUI(); coachCue(); }
   });
   proc.on('recoil', () => { if (mode === 'train') updateCompUI(); });
 
@@ -896,6 +897,51 @@ if (typeof module !== 'undefined') module.exports = RF;
   $('btn-metro').onclick = () => setMetro(!metroOn);
   $('btn-reset').onclick = () => { session = []; updateCompUI(); };
 
+
+  // ---------- voice coach (training only) ----------
+  // Speaks a short cue when a problem shows up in 3 of the last 4 compressions,
+  // at most once every 3 seconds, and says "Good" once the problem is fixed.
+  const canSpeak = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+  const voice = { on: false, lastSaid: '', lastAt: 0, problem: null, goodRun: 0, lastPraise: 0 };
+  function say(text) {
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US'; u.rate = 1.1; u.volume = 1;
+      speechSynthesis.cancel(); speechSynthesis.speak(u);
+    } catch (e) {}
+    voice.lastSaid = text; voice.lastAt = performance.now();
+  }
+  function coachCue() {
+    if (!voice.on || mode !== 'train') return;
+    const recent = live.comps.slice(-4); if (recent.length < 4) return;
+    const ks = recent.map(x => RF.classify(x, cfg));
+    const count = f => ks.filter(f).length;
+    const now = performance.now(), r = rollingRate(now);
+    let cue = null;
+    if (count(k => k.recoil === 'incomplete') >= 3) cue = 'Let it come all the way up';
+    else if (count(k => k.depth === 'shallow') >= 3) cue = 'Push harder';
+    else if (count(k => k.depth === 'deep') >= 3) cue = 'Not so deep';
+    else if (r != null && r < cfg.rateMin - 2) cue = 'Go faster';
+    else if (r != null && r > cfg.rateMax + 2) cue = 'Slow down';
+    if (cue) {
+      voice.goodRun = 0;
+      if (now - voice.lastAt > 3000 && (cue !== voice.lastSaid || now - voice.lastAt > 6000)) { say(cue); voice.problem = cue; }
+    } else {
+      voice.goodRun++;
+      if (voice.problem && voice.goodRun >= 4 && now - voice.lastAt > 2000) { say('Good'); voice.problem = null; voice.lastPraise = now; }
+      else if (!voice.problem && voice.goodRun >= 12 && now - voice.lastPraise > 25000 && now - voice.lastAt > 5000) { say('Good compressions. Keep going'); voice.lastPraise = now; }
+    }
+  }
+  function setVoice(on) {
+    voice.on = on && canSpeak;
+    $('btn-voice').textContent = voice.on ? 'Voice coach on' : 'Voice coach off';
+    $('btn-voice').setAttribute('aria-pressed', voice.on);
+    if (voice.on) { voice.problem = null; voice.goodRun = 0; say('Voice coach on'); }   // speaking from the tap unlocks audio on iPhone and iPad
+    else { try { speechSynthesis.cancel(); } catch (e) {} }
+  }
+  if (!canSpeak) $('btn-voice').hidden = true;
+  $('btn-voice').onclick = () => setVoice(!voice.on);
+
   // ---------- test mode ----------
   const DURS = [[30, '30 seconds'], [60, '1 minute'], [120, '2 minutes']];
   function critText(minCount) {
@@ -919,6 +965,7 @@ if (typeof module !== 'undefined') module.exports = RF;
   }
   function showTest(part) { $('t-setup').hidden = part !== 'setup'; $('t-run').hidden = part !== 'run'; $('t-result').hidden = part !== 'result'; }
   function startTest() {
+    try { window.speechSynthesis && speechSynthesis.cancel(); } catch (e) {}
     setMetro(false);
     test = { phase: 'count', t0: performance.now(), dur: cfg.testDuration * 1000, comps: [] };
     $('t-run').classList.remove('live');
